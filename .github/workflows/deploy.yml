@@ -1,0 +1,66 @@
+name: Deploy Website to AWS
+
+on:
+    push:
+        branches:
+            - main
+    workflow_dispatch:
+
+permissions:
+    contents: read
+    id-token: write
+
+jobs:
+    test-build-deploy:
+        name: Test, Package and Deploy
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout source code
+              uses: actions/checkout@v4
+
+            - name: Validate website files
+              run: |
+                  test -s index.html
+                  test -s style.css
+                  grep -q "CI/CD Deployment Successful" index.html
+                  echo "Website validation passed."
+
+            - name: Package website
+              run: |
+                  mkdir -p dist
+                  cp index.html style.css dist/
+                  test -s dist/index.html
+                  test -s dist/style.css
+                  echo "Website packaged successfully."
+
+            # TEMPORARY DIAGNOSTIC - remove once OIDC works
+            - name: Debug OIDC claims and role input
+              run: |
+                  echo "role-to-assume: [${{ vars.AWS_ROLE_ARN }}]"
+                  echo "aws-region:     [${{ vars.AWS_REGION }}]"
+                  echo "s3-bucket:      [${{ vars.S3_BUCKET }}]"
+                  echo "---- OIDC token claims ----"
+                  TOKEN=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+                  echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{sub, aud, repository, repository_owner, ref}'
+
+            - name: Configure AWS credentials using OIDC
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+                  aws-region: ${{ vars.AWS_REGION }}
+
+            - name: Verify assumed identity
+              run: aws sts get-caller-identity
+
+            - name: Deploy website to S3
+              run: |
+                  aws s3 sync dist/ s3://${{ vars.S3_BUCKET }}/ \
+                    --delete
+
+            - name: Invalidate CloudFront cache
+              run: |
+                  aws cloudfront create-invalidation \
+                    --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
+                    --paths "/*"
